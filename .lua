@@ -4,33 +4,91 @@ local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
--- Player setup
+-- Flying handler names and connection references
+local velocityHandlerName = "VelocityHandler"
+local gyroHandlerName = "GyroHandler"
+local mfly1, mfly2
+
+-- Flag to allow unfly only after placing parts
+local canUnfly = false
+
+-- Main variables
 local Player = Players.LocalPlayer
-if not Player.Character then
-    Player.CharacterAdded:Wait()
+local Character = Player.Character or Player.CharacterAdded:Wait()
+local Humanoid = Character:WaitForChild("Humanoid")
+local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
+
+-- Prevent collisions on character parts
+task.spawn(function()
+    while true do
+        for _, part in ipairs(Character:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = false
+            end
+        end
+        task.wait(0.1)
+    end
+end)
+Player.CharacterAdded:Connect(function()
+    Character = Player.Character or Player.CharacterAdded:Wait()
+    Humanoid = Character:WaitForChild("Humanoid")
+    HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
+    task.wait(0.2)
+    while true do
+        for _, part in ipairs(Character:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = false
+            end
+        end
+        task.wait(0.1)
+    end
+end)
+
+if not Character.PrimaryPart then
+    Character.PrimaryPart = HumanoidRootPart
 end
-local Character = Player.Character
-local HRP = Character:WaitForChild("HumanoidRootPart")
-local HUM = Character:FindFirstChildOfClass("Humanoid")
 
--- Store original WalkSpeed
-local originalWalkSpeed = HUM.WalkSpeed
+local originalWalkSpeed = Humanoid.WalkSpeed
+local originalJumpPower = Humanoid.JumpPower
 
--- Disable default movement
-HUM.WalkSpeed = 0
+-- Disable flying function (triggered on jump once allowed or manually)
+local function disableFlying()
+    pcall(function()
+        _G.FLYING = false
+        local root = HumanoidRootPart
+        if root:FindFirstChild(velocityHandlerName) then
+            root:FindFirstChild(velocityHandlerName):Destroy()
+        end
+        if root:FindFirstChild(gyroHandlerName) then
+            root:FindFirstChild(gyroHandlerName):Destroy()
+        end
+        Humanoid.PlatformStand = false
+        if mfly1 then
+            mfly1:Disconnect()
+            mfly1 = nil
+        end
+        if mfly2 then
+            mfly2:Disconnect()
+            mfly2 = nil
+        end
+    end)
+end
 
--- Step 1: Teleport above Generator and anchor
+Humanoid.WalkSpeed = 0
+
+-- Teleport to Generator
 local Generator = Workspace:WaitForChild("TeslaLab"):WaitForChild("Generator")
-local modelPosition = Generator:GetPivot().Position
-HRP:PivotTo(CFrame.new(modelPosition + Vector3.new(0, 5, 0)))
-HRP.Anchored = true
+local generatorCFrame = Generator:GetPivot()
+local modelPosition = generatorCFrame.Position
+HumanoidRootPart.CFrame = CFrame.new(modelPosition + Vector3.new(0, 5, 0))
+HumanoidRootPart.Anchored = true
 task.wait(2)
 
--- Step 2: Find and sit on closest available Chair.Seat
+-- Find and sit on nearest chair
 local RuntimeItems = Workspace:WaitForChild("RuntimeItems")
 local function findClosestSeat()
     local closestSeat, minDist = nil, math.huge
-    local pos = HRP.Position
+    local pos = HumanoidRootPart.Position
     for _, chairModel in ipairs(RuntimeItems:GetChildren()) do
         if chairModel:IsA("Model") and chairModel.Name == "Chair" then
             local seat = chairModel:FindFirstChildOfClass("Seat")
@@ -47,29 +105,29 @@ local function findClosestSeat()
 end
 
 local seat = findClosestSeat()
-local chosenSeat, seatWeld
+local seatWeld
 if seat then
-    HRP.Anchored = true
-    HRP:PivotTo(seat.CFrame + Vector3.new(0, 3, 0))
+    HumanoidRootPart.Anchored = true
+    HumanoidRootPart.CFrame = seat.CFrame + Vector3.new(0, 3, 0)
     task.delay(0.1, function()
-        if HRP and HRP.Anchored then HRP.Anchored = false end
+        if HumanoidRootPart and HumanoidRootPart.Anchored then
+            HumanoidRootPart.Anchored = false
+        end
     end)
     task.delay(0.15, function()
-        if HRP and HRP.Anchored then HRP.Anchored = false end
+        if HumanoidRootPart and HumanoidRootPart.Anchored then
+            HumanoidRootPart.Anchored = false
+        end
     end)
     task.wait(0.5)
-    seat:Sit(HUM)
+    seat:Sit(Humanoid)
 
-    -- Weld HRP to seat to remain seated during actions
-    local weld = Instance.new("WeldConstraint")
-    weld.Name = "PersistentSeatWeld"
-    weld.Part0 = HRP
-    weld.Part1 = seat
-    weld.Parent = HRP
-    chosenSeat = seat
-    seatWeld = weld
+    seatWeld = Instance.new("WeldConstraint")
+    seatWeld.Name = "PersistentSeatWeld"
+    seatWeld.Part0 = HumanoidRootPart
+    seatWeld.Part1 = seat
+    seatWeld.Parent = HumanoidRootPart
 
-    -- Disable collisions on entire chair model
     local chairModel = seat.Parent
     for _, part in ipairs(chairModel:GetDescendants()) do
         if part:IsA("BasePart") then
@@ -77,89 +135,123 @@ if seat then
         end
     end
 else
-    HRP.Anchored = false
+    HumanoidRootPart.Anchored = false
     return
 end
 
--- Step 3: Enable scripted flying via BodyVelocity, BodyGyro, and Noclip
-local v3inf = Vector3.new(9e9, 9e9, 9e9)
-local BV = Instance.new("BodyVelocity")
-BV.Name = "FlyBV"
-BV.Parent = HRP
-BV.MaxForce = v3inf
-BV.Velocity = Vector3.new()
+-- Enable hybrid flying
+local FLYING = true
+local flyingToTarget = false
+local targetFlyPosition = nil
+local iyflyspeed = 50
 
-local BG = Instance.new("BodyGyro")
-BG.Name = "FlyBG"
-BG.Parent = HRP
-BG.MaxTorque = v3inf
-BG.P = 1000
-BG.D = 50
+local function enableHybridFlying()
+    local root = HumanoidRootPart
+    local camera = Workspace.CurrentCamera
+    local v3inf = Vector3.new(9e9, 9e9, 9e9)
+    local controlModule = require(Player.PlayerScripts:WaitForChild("PlayerModule"):WaitForChild("ControlModule"))
 
--- Noclip connection (character and chair)
-local noclipConn
-local function enableNoclip()
-    noclipConn = RunService.Stepped:Connect(function()
-        for _, part in ipairs(Character:GetDescendants()) do
-            if part:IsA("BasePart") then
-                part.CanCollide = false
-            end
+    local bv = Instance.new("BodyVelocity")
+    bv.Name = velocityHandlerName
+    bv.Parent = root
+    bv.MaxForce = v3inf
+    bv.Velocity = Vector3.new()
+
+    local bg = Instance.new("BodyGyro")
+    bg.Name = gyroHandlerName
+    bg.Parent = root
+    bg.MaxTorque = v3inf
+    bg.P = 1000
+    bg.D = 50
+
+    mfly1 = Player.CharacterAdded:Connect(function()
+        local newRoot = Player.Character:WaitForChild("HumanoidRootPart")
+        if newRoot:FindFirstChild(velocityHandlerName) then
+            newRoot:FindFirstChild(velocityHandlerName):Destroy()
         end
-        if chosenSeat then
-            local chairModel = chosenSeat.Parent
-            for _, part in ipairs(chairModel:GetDescendants()) do
-                if part:IsA("BasePart") then
-                    part.CanCollide = false
+        if newRoot:FindFirstChild(gyroHandlerName) then
+            newRoot:FindFirstChild(gyroHandlerName):Destroy()
+        end
+        bv.Parent = newRoot
+        bg.Parent = newRoot
+    end)
+
+    mfly2 = RunService.RenderStepped:Connect(function()
+        if _G.FLYING then
+            local humanoidObj = Player.Character:FindFirstChildWhichIsA("Humanoid")
+            local VelocityHandler = root:FindFirstChild(velocityHandlerName)
+            local GyroHandler = root:FindFirstChild(gyroHandlerName)
+            if humanoidObj and VelocityHandler and GyroHandler then
+                if flyingToTarget and targetFlyPosition then
+                    local dir = (targetFlyPosition - root.Position)
+                    if dir.Magnitude > 2 then
+                        local moveDir = dir.Unit
+                        VelocityHandler.Velocity = moveDir * iyflyspeed
+                        GyroHandler.CFrame = CFrame.new(root.Position, targetFlyPosition)
+                    else
+                        VelocityHandler.Velocity = Vector3.new()
+                        flyingToTarget = false
+                        targetFlyPosition = nil
+                    end
+                else
+                    GyroHandler.CFrame = camera.CFrame
+                    local direction = controlModule:GetMoveVector()
+                    VelocityHandler.Velocity =
+                        (camera.CFrame.RightVector * direction.X * iyflyspeed) +
+                        (-camera.CFrame.LookVector * direction.Z * iyflyspeed)
                 end
             end
         end
     end)
 end
 
-local function disableNoclip()
-    if noclipConn then
-        noclipConn:Disconnect()
-        noclipConn = nil
-    end
-    for _, part in ipairs(Character:GetDescendants()) do
-        if part:IsA("BasePart") then
-            part.CanCollide = true
-        end
-    end
-    if chosenSeat then
-        local chairModel = chosenSeat.Parent
-        for _, part in ipairs(chairModel:GetDescendants()) do
-            if part:IsA("BasePart") then
-                part.CanCollide = true
-            end
-        end
-    end
-end
-
 local function flyTo(targetPos)
-    while (HRP.Position - targetPos).Magnitude > 2 do
-        local dir = (targetPos - HRP.Position).Unit
-        BV.Velocity = dir * 50
-        BG.CFrame = CFrame.new(HRP.Position, targetPos)
-        RunService.Heartbeat:Wait()
+    flyingToTarget = true
+    targetFlyPosition = targetPos
+    while flyingToTarget and targetFlyPosition and (HumanoidRootPart.Position - targetFlyPosition).Magnitude > 2 do
+        RunService.RenderStepped:Wait()
     end
-    BV.Velocity = Vector3.new()
+    flyingToTarget = false
+    targetFlyPosition = nil
 end
 
-enableNoclip()
+-- Start flying
+_G.FLYING = true
+enableHybridFlying()
 
--- Restore movement speed
+-- On Humanoid state change: detect jump to unweld/unsit and possibly unfly
+Humanoid.StateChanged:Connect(function(_, newState)
+    if newState == Enum.HumanoidStateType.Jumping then
+        -- Always remove weld and force unsit
+        if seatWeld then
+            seatWeld:Destroy()
+            seatWeld = nil
+        end
+        if Humanoid.Sit then
+            Humanoid.Sit = false
+        end
+        -- Unanchor so player can move
+        HumanoidRootPart.Anchored = false
+        -- Disable flying if allowed
+        if canUnfly then
+            disableFlying()
+        end
+    end
+end)
+
+-- Restore walk/jump after a brief delay
 task.wait(1)
-HUM.WalkSpeed = originalWalkSpeed
+Humanoid.WalkSpeed = originalWalkSpeed
+Humanoid.JumpPower = originalJumpPower
 
--- Step 4: Equip Sack tool
+-- Equip Sack tool
 local sackTool = Player.Backpack:FindFirstChild("Sack")
 if sackTool then
-    HUM:EquipTool(sackTool)
+    Humanoid:EquipTool(sackTool)
     task.wait(0.5)
 end
 
--- Step 5: Collect Werewolf parts by flying to each
+-- Collect werewolf parts
 local itemsToCollect = {
     Workspace.RuntimeItems:FindFirstChild("LeftWerewolfArm"),
     Workspace.RuntimeItems:FindFirstChild("LeftWerewolfLeg"),
@@ -196,7 +288,7 @@ for _, item in ipairs(itemsToCollect) do
     end
 end
 
--- Step 6: Fly to front of ExperimentTable to drop parts
+-- Assemble parts on experiment table
 local experimentTable = Workspace.TeslaLab:FindFirstChild("ExperimentTable")
 local placedPartsFolder = experimentTable and experimentTable:FindFirstChild("PlacedParts")
 if experimentTable and placedPartsFolder then
@@ -220,7 +312,7 @@ if experimentTable and placedPartsFolder then
             local attempts = 0
             while not success and attempts < 5 do
                 dropRemote:FireServer()
-                task.wait(0.5)
+                task.wait(0.2)
                 local currentCount = #placedPartsFolder:GetChildren()
                 if currentCount > initialCount then
                     success = true
@@ -232,33 +324,68 @@ if experimentTable and placedPartsFolder then
                 end
             end
         end
+        -- After dropping all parts on table, allow unfly via jump
+        canUnfly = true
     end
 end
 
--- **After dropping all parts onto table: fly to generator and turn on power**
-local powerPromptPart = Workspace.TeslaLab.Generator.BasePart:FindFirstChild("PowerPrompt")
-if powerPromptPart and powerPromptPart:IsA("BasePart") then
-    local prompt = powerPromptPart:FindFirstChildWhichIsA("ProximityPrompt", true)
-    if prompt then
-        prompt.RequiresLineOfSight = false
-        prompt.MaxActivationDistance = 100
-        local promptPos = powerPromptPart.Position + Vector3.new(0, 2, 0)
-        flyTo(promptPos)
-        task.wait(0.1)
-        while prompt.Enabled do
-            prompt:InputHoldBegin()
-            task.wait(0.05)
-            prompt:InputHoldEnd()
-            task.wait(0.05)
+-- Continue to generator and activate prompts
+task.wait(1)
+HumanoidRootPart.CFrame = generatorCFrame * CFrame.new(0, 4, 0)
+task.wait(2)
+local POSITION = HumanoidRootPart.Position
+local nearestPrompt, nearestDist = nil, math.huge
+for _, part in ipairs(Workspace:GetDescendants()) do
+    if part:IsA("ProximityPrompt") and part.Enabled then
+        local parent = part.Parent
+        if parent and parent:IsA("BasePart") then
+            local dist = (parent.Position - POSITION).Magnitude
+            if dist < nearestDist then
+                nearestPrompt = part
+                nearestDist = dist
+            end
         end
     end
 end
+if nearestPrompt then
+    for i = 1, 3 do
+        fireproximityprompt(nearestPrompt)
+        task.wait(0.2)
+    end
+else
+    warn("No enabled ProximityPrompt found near the teleport location.")
+end
 
--- Prevent falling through map
-HUM.Jump = true
-task.wait(0.25)
+task.wait(3)
 
--- Cleanup flying handlers and disable noclip
-BV:Destroy()
-BG:Destroy()
-disableNoclip()
+if experimentTable then
+    local tpTarget = experimentTable.PrimaryPart or experimentTable:FindFirstChildWhichIsA("BasePart")
+    if tpTarget then
+        HumanoidRootPart.CFrame = tpTarget.CFrame * CFrame.new(0, 12, 0)
+    end
+end
+
+while true do task.wait() end
+
+-- Load additional scripts
+task.spawn(function()
+    task.wait(1)
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/ringtaa/fly.github.io/refs/heads/main/fly.lua"))()
+end)
+
+task.spawn(function()
+    task.wait(2)
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/hbjrev/newhit.github.io/refs/heads/main/hithit.lua"))()
+end)
+
+task.spawn(function()
+    local Backpack = Player:WaitForChild("Backpack")
+    local Character = Player.Character or Player.CharacterAdded:Wait()
+    local Humanoid = Character:WaitForChild("Humanoid")
+    local shovel = Backpack:FindFirstChild("shovel")
+    if shovel then
+        Humanoid:EquipTool(shovel)
+    else
+        warn("No shovel found in your inventory!")
+    end
+end)
